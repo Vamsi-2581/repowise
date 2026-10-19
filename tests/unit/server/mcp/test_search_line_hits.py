@@ -26,6 +26,7 @@ _FILES = {
         "    print('hello there')\n"
         "    return backend_of('m')\n"
         "x = 147821\n"
+        'USER_AGENT = "acme-cli/0.1.0"\n'
     ),
 }
 
@@ -135,6 +136,30 @@ async def test_literal_number_is_scanned_with_definition_first(tree):
     ]
     assert out["lines"][1]["text"] == "PORT = 47821"
     assert out["complete"] is True
+
+
+@pytest.mark.asyncio
+async def test_slash_literal_falls_back_from_path_mode(tree):
+    out = await search_codebase("acme-cli/0.1.0")
+
+    assert _rows(out) == [("app/widget.py", 8, "definition")]
+    assert out["complete"] is True
+
+
+@pytest.mark.asyncio
+async def test_slash_literal_is_scanned_in_hybrid_mode(tree):
+    out = await search_codebase("acme-cli/0.1.0", mode="hybrid")
+
+    assert _rows(out) == [("app/widget.py", 8, "definition")]
+    assert out["complete"] is True
+
+
+@pytest.mark.asyncio
+async def test_matching_path_query_does_not_add_line_hits(tree):
+    out = await search_codebase("app/widget.py", mode="path")
+
+    assert any(result["path"] == "app/widget.py" for result in out["results"])
+    assert "lines" not in out
 
 
 @pytest.mark.asyncio
