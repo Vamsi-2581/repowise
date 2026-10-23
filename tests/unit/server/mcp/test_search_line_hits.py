@@ -162,6 +162,15 @@ async def test_matching_path_query_does_not_add_line_hits(tree):
     assert "lines" not in out
 
 
+@pytest.mark.parametrize("query", ["SomeName", "./", "../"])
+@pytest.mark.asyncio
+async def test_unmatched_path_query_only_falls_back_for_slash_literals(tree, query):
+    out = await search_codebase(query, mode="path")
+
+    assert out["results"] == []
+    assert "lines" not in out
+
+
 @pytest.mark.asyncio
 async def test_quoted_string_is_scanned_as_a_substring(tree):
     out = await search_codebase('"hello there"')
