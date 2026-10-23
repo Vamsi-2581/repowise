@@ -7,6 +7,10 @@ exception must suppress an otherwise-denied edge.
 
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -195,6 +199,59 @@ def test_longer_cycle():
     assert total == 1
     assert set(cycles[0].nodes) == {"a", "b", "c"}
     assert cycles[0].length == 3
+
+
+def test_cycle_order_is_stable_across_hash_seeds():
+    script = """
+import json
+
+from repowise.core.workspace.cycles import detect_cycles
+from repowise.core.workspace.system_graph import SystemEdge, SystemGraph, SystemNode
+
+names = ("billing", "orders", "users")
+nodes = [SystemNode(id=name, repo=name, service_path=None, name=name) for name in names]
+edge_specs = (
+    ("billing", "orders", "http"),
+    ("orders", "billing", "grpc"),
+    ("orders", "users", "http"),
+    ("users", "billing", "event"),
+)
+edges = [
+    SystemEdge(
+        id=f"{source}->{target}:{kind}",
+        source=source,
+        target=target,
+        kind=kind,
+        match_type="exact",
+        confidence=1.0,
+        weight=1,
+        structural=True,
+    )
+    for source, target, kind in edge_specs
+]
+cycles, total = detect_cycles(SystemGraph(nodes=nodes, edges=edges))
+print(json.dumps({"cycles": [cycle.to_dict() for cycle in cycles], "total": total}, sort_keys=True))
+"""
+    outputs = []
+    for seed in ("0", "1"):
+        env = os.environ.copy()
+        env["PYTHONHASHSEED"] = seed
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        outputs.append(result.stdout)
+
+    assert outputs[0] == outputs[1]
+    result = json.loads(outputs[0])
+    assert result["total"] == 2
+    assert all(cycle["nodes"][0] == min(cycle["nodes"]) for cycle in result["cycles"])
+    two_node_cycle = next(cycle for cycle in result["cycles"] if len(cycle["nodes"]) == 2)
+    assert two_node_cycle["nodes"] == ["billing", "orders"]
+    assert two_node_cycle["leg_kinds"] == [["http"], ["grpc"]]
 
 
 def test_acyclic_graph_has_no_cycles():
