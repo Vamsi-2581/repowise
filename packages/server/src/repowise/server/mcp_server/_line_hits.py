@@ -95,7 +95,7 @@ def _literal(query: str) -> tuple[str, bool] | None:
         return m.group(2), False
     if len(q) >= 2 and _TOKEN.match(q) and not q.endswith("."):
         return q, True
-    if len(q) >= 2 and "/" in q and not any(char.isspace() for char in q):
+    if len(q) >= 2 and "/" in q and q.strip("./") and not any(char.isspace() for char in q):
         return q, False
     if _is_code_shaped(q):
         return q, False
@@ -423,9 +423,11 @@ async def _attach(
 ) -> None:
     if repo == "all":
         return
-    if mode == "path" and response.get("results"):
-        return
     literal = _literal(query)
+    if mode == "path" and (
+        response.get("results") or literal is None or "/" not in literal[0]
+    ):
+        return
     candidates = _identifier_candidates(query, mode, names)
     if literal and not literal[1] and not _QUOTED.match(query.strip()):
         # Code punctuation names the text itself: an identifier inside it
