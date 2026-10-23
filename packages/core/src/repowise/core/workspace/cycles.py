@@ -146,6 +146,8 @@ def detect_cycles(graph: SystemGraph) -> tuple[list[DependencyCycle], int]:
     cycles: list[DependencyCycle] = []
     try:
         for raw in nx.simple_cycles(digraph):
+            start = raw.index(min(raw))
+            raw = raw[start:] + raw[:start]
             cycle = _cycle(raw, adjacency)
             if cycle.edge_ids:
                 cycles.append(cycle)
