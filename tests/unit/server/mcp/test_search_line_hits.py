@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from repowise.core.persistence.models import GraphEdge, GraphNode
+from repowise.core.persistence.models import GraphEdge, GraphNode, Page
 from repowise.server.mcp_server import _edit_sites, _line_hits, _meta, _state
 from repowise.server.mcp_server._budget import enforce_response_budget
 from repowise.server.mcp_server.tool_search import search_codebase
@@ -155,7 +155,28 @@ async def test_slash_literal_is_scanned_in_hybrid_mode(tree):
 
 
 @pytest.mark.asyncio
-async def test_matching_path_query_does_not_add_line_hits(tree):
+async def test_matching_path_query_does_not_add_line_hits(tree, session, setup_mcp):
+    # Path mode matches indexed file pages, so the file needs one to be found.
+    session.add(
+        Page(
+            id="file_page:app/widget.py",
+            repository_id=setup_mcp,
+            page_type="file_page",
+            title="Widget",
+            content="# Widget",
+            target_path="app/widget.py",
+            source_hash="widget",
+            model_name="mock",
+            provider_name="mock",
+            generation_level=2,
+            confidence=0.8,
+            freshness_status="fresh",
+            metadata_json="{}",
+            created_at=_NOW,
+            updated_at=_NOW,
+        )
+    )
+    await session.commit()
     out = await search_codebase("app/widget.py", mode="path")
 
     assert any(result["path"] == "app/widget.py" for result in out["results"])
