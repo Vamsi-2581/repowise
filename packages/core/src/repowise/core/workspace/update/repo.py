@@ -58,7 +58,7 @@ def _local_settings_json(repo_path: Path) -> str | None:
         if row and row[0]:
             return row[0]
     except Exception:
-        pass
+        _log.debug("Could not read repo settings from local wiki.db", exc_info=True)
     return None
 
 
@@ -85,7 +85,11 @@ async def _configured_settings_json(configured_url: str, repo_path: Path) -> str
         finally:
             await engine.dispose()
     except Exception:
-        pass
+        _log.warning(
+            "Could not read repo settings from the shared database; "
+            "saved exclude patterns not applied",
+            exc_info=True,
+        )
     return settings_json
 
 
@@ -98,7 +102,9 @@ def _merge_settings_excludes(patterns: list[str], settings_json: str) -> None:
                 if isinstance(value, str) and value not in patterns:
                     patterns.append(value)
     except Exception:
-        pass
+        _log.warning(
+            "Could not parse settings_json; saved exclude patterns not applied", exc_info=True
+        )
 
 
 @dataclass
@@ -242,7 +248,7 @@ async def _incremental_repo_update(
         alias=alias,
         updated=True,
         file_count=file_count,
-        symbol_count=sum(len(pf.symbols) for pf in parsed_files),
+        symbol_count=sum(pf.symbol_count for pf in parsed_files),
         kg_state=_export_kg_state(repo_path, alias, kg),
         working_tree_paths=working_tree_paths,
         git_history_refreshed=bool(full_git_summaries) and "Git persist" not in failed_steps,

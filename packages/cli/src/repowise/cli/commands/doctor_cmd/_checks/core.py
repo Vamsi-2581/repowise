@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path as _DoctorPath
 
 from repowise.cli.helpers import db_configured, load_state, run_async
@@ -115,11 +116,38 @@ def _events_config_check(repo_path: _DoctorPath) -> DoctorCheck | None:
     return _check("Events config", False, "; ".join(errors) + " (defaults used)")
 
 
+def _env_repo_covers(repo_path: _DoctorPath) -> bool:
+    """Whether the repo ``GIT_DIR`` / ``GIT_WORK_TREE`` name holds ``repo_path`` (#1931).
+
+    A linked worktree or container can have a ``.git`` file the explicit-path
+    constructor cannot follow. Without those variables ``Repo()`` searches up
+    from the cwd, which says nothing about ``repo_path``.
+    """
+    if not (os.environ.get("GIT_DIR") or os.environ.get("GIT_WORK_TREE")):
+        return False
+    from repowise.core.git_repo import Repo
+
+    found = Repo()
+    try:
+        work_tree = found.working_tree_dir
+    finally:
+        found.close()
+    if work_tree is None:
+        return False
+    return _DoctorPath(repo_path).resolve().is_relative_to(_DoctorPath(work_tree).resolve())
+
+
 def _git_check(repo_path: _DoctorPath) -> DoctorCheck:
     try:
+        from git import InvalidGitRepositoryError, NoSuchPathError
+
         from repowise.core.git_repo import Repo
 
-        Repo(repo_path, search_parent_directories=True).close()
+        try:
+            Repo(repo_path, search_parent_directories=True).close()
+        except (InvalidGitRepositoryError, NoSuchPathError):
+            if not _env_repo_covers(repo_path):
+                raise
         return _check("Git repository", True, str(repo_path))
     except Exception:
         return _check("Git repository", False, "Not a git repo")
@@ -194,6 +222,61 @@ def _store_format_row(repo_path: _DoctorPath) -> DoctorCheck:
         return _check("Store format", True, f"Could not check: {e}")
 
 
+def _runtime_grammar_rows(repo_path: _DoctorPath) -> list[DoctorCheck]:
+    """One row per runtime-downloaded grammar the repo needs, read from the cache only."""
+    import subprocess
+
+    from repowise.core.ingestion.languages.registry import REGISTRY
+    from repowise.core.ingestion.parser.grammars import (
+        downloads_grammar_at_runtime,
+        runtime_grammar_cache,
+    )
+
+    by_ext = {
+        ext: tag
+        for ext, tag in REGISTRY.all_extensions().items()
+        if downloads_grammar_at_runtime(tag)
+    }
+    try:
+        listed = subprocess.run(
+            # Untracked, unignored files too: ingestion walks them as well.
+            ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+            cwd=repo_path,
+            capture_output=True,
+            check=True,
+        ).stdout.decode("utf-8", errors="replace")
+    except (OSError, subprocess.CalledProcessError):
+        return []
+    counts: dict[str, int] = {}
+    for path in filter(None, listed.split("\0")):
+        tag = by_ext.get(os.path.splitext(path)[1].lower())
+        if tag:
+            counts[tag] = counts.get(tag, 0) + 1
+
+    rows = []
+    for tag, count in sorted(counts.items()):
+        spec = REGISTRY.get(tag)
+        name = f"{spec.display_name if spec else tag} grammar"
+        try:
+            cached, cache_dir = runtime_grammar_cache(tag)
+        except Exception as exc:
+            rows.append(_check(name, False, f"could not read the grammar cache ({exc})"))
+            continue
+        if cached:
+            rows.append(_check(name, True, f"cached in {cache_dir}"))
+        else:
+            rows.append(
+                _check(
+                    name,
+                    False,
+                    f"not downloaded; {count:,} files would index without symbols. "
+                    "Re-run 'repowise init' with network access, or set "
+                    "REPOWISE_GRAMMAR_DIR to a pre-staged grammar cache first",
+                )
+            )
+    return rows
+
+
 def core_checks(ctx: CheckContext) -> list[DoctorCheck]:
     """Checks 1-4b, in order. Fills the database and state fields of *ctx*."""
     checks = [_git_check(ctx.repo_path)]
@@ -205,4 +288,5 @@ def core_checks(ctx: CheckContext) -> list[DoctorCheck]:
     checks.append(_state_row(ctx))
     if ctx.state_ok:
         checks.append(_store_format_row(ctx.repo_path))
+    checks.extend(_runtime_grammar_rows(ctx.repo_path))
     return checks

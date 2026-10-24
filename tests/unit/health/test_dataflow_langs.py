@@ -679,6 +679,35 @@ def test_java_extract_method_fires():
     assert best.slice_nloc >= 6
 
 
+def test_java_span_never_shares_a_line_with_a_compact_block_brace():
+    # A block opened on its header's line and closed on its last statement's
+    # line: a span over its statements would lift the header and the brace.
+    src = """
+    class Demo {
+        int f(int[] xs, int limit) {
+            int total = 0;
+            int extra = 0;
+            for (int x : xs) {
+                total += x;
+            }
+            if (limit > 0) { extra = limit * 2;
+                if (extra > 9) {
+                    extra = 9;
+                }
+                total += extra;
+                total += 1; }
+            return total;
+        }
+    }
+    """
+    lmap = get_language_map("java")
+    lines = textwrap.dedent(src).splitlines()
+    header = next(i for i, ln in enumerate(lines, 1) if "if (limit > 0) {" in ln)
+    brace = next(i for i, ln in enumerate(lines, 1) if "total += 1; }" in ln)
+    for e in find_extractions(_first("java", src), lmap):
+        assert e.start_line != header and e.end_line != brace
+
+
 def test_java_extractions_are_deterministic():
     lmap = get_language_map("java")
     fn = _first("java", _JAVA_PROCESS)
@@ -3407,3 +3436,39 @@ def test_csharp_lambda_writing_outer_local_records_def():
     assert any(occ.name == "tryCount" for occ in fn.def_use.captured.writes)
     extractions = find_extractions(fn, lmap)
     assert not any(x.start_line <= 4 and x.end_line >= 5 for x in extractions)
+
+
+def test_cpp_condition_declaration_records_use_of_initializer() -> None:
+    code = (
+        b"void f() {\n"
+        b"    if (auto v = settings.get(1)) {\n"
+        b"        use(v);\n"
+        b"    }\n"
+        b"    while (auto w = helper.next()) {\n"
+        b"        use(w);\n"
+        b"    }\n"
+        b"}\n"
+    )
+    import tree_sitter_cpp
+    from tree_sitter import Language, Parser
+
+    from repowise.core.analysis.health.complexity.languages import get_language_map
+    from repowise.core.analysis.health.dataflow.dialects.cpp import CppDefUseDialect
+
+    parser = Parser(Language(tree_sitter_cpp.language()))
+    tree = parser.parse(code)
+    fn = tree.root_node.children[0]
+    body = fn.child_by_field_name("body")
+    if_stmt = body.children[1]
+    while_stmt = body.children[2]
+
+    lmap = get_language_map("cpp")
+    dialect = CppDefUseDialect()
+
+    if_sdu = dialect.statement_def_use(if_stmt, lmap, head_only=True)
+    assert any(d.name == "v" for d in if_sdu.defs)
+    assert any(u.name == "settings" for u in if_sdu.uses)
+
+    while_sdu = dialect.statement_def_use(while_stmt, lmap, head_only=True)
+    assert any(d.name == "w" for d in while_sdu.defs)
+    assert any(u.name == "helper" for u in while_sdu.uses)

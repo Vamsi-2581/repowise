@@ -80,6 +80,7 @@ PERFORMANCE = [
      "file_path": "src/repo.py", "intervention_symbol": "src/repo.py::Repo.load",
      "affected_call_sites_total": 4, "affected_files_total": 2, "queue_eligible": True,
      "details": {"facets": {"exposure": "entry_reachable", "loop_magnitude": "grows_with_data",
+                            "growth_source": "loop",
                             "actionability_confidence": "medium"},
                  "plan": {"effort_bucket": "S"}}},
     {"opportunity_id": "perf2", "execution_context": "production",
@@ -127,7 +128,8 @@ def _rows(dead_ids: list[str], **overrides):
         "known_paths": ["src/old.py"],
         "dead_code": [
             {"id": i, "kind": "unused_export", "file_path": "src/dead.py",
-             "symbol_name": f"f{n}", "lines": 10, "safe_to_delete": True}
+             "symbol_name": f"f{n}", "lines": 10, "confidence": 0.9,
+             "safe_to_delete": True}
             for n, i in enumerate(dead_ids)
         ],
         "decisions": {"stale_decisions": [], "summary": {}},

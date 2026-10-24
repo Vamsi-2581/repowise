@@ -957,7 +957,7 @@ The analyzer runs after `GitIndexer` during init (Step 3.6) and optionally durin
 **Finding types:**
 - `unreachable_file`: file with `in_degree == 0`, not an entry point, test, or config
 - `unused_export`: public symbol with no incoming edges (but file IS imported)
-- `unused_internal`: private symbol with no `calls` edges from same file
+- `unused_internal`: private symbol with no `calls` edges from same file; a COBOL paragraph is judged from the program's source text instead
 - `zombie_package`: monorepo package with no incoming `inter_package` edges
 
 **Confidence scoring (conservative: when in doubt, do NOT flag):**
@@ -1579,7 +1579,7 @@ Key files:
 | `core/generation/editor_files/fetcher.py` | `EditorFileDataFetcher`, queries DB for architecture summary, modules, hotspots, decisions |
 | `core/generation/editor_files/tech_stack.py` | Filesystem scan for languages, frameworks, build commands |
 | `core/generation/editor_files/claude_md.py` | `ClaudeMdGenerator`, 30-line subclass that binds filename + template |
-| `core/generation/templates/claude_md.j2` | Jinja2 template for the Repowise-managed section |
+| `core/generation/templates/_editor_block.j2` | Jinja2 template for the Repowise-managed section |
 | `cli/commands/claude_md_cmd.py` | `repowise generate-claude-md` CLI command |
 | `server/routers/claude_md.py` | `GET/POST /api/repos/{id}/claude-md` REST endpoints |
 

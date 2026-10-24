@@ -22,7 +22,7 @@ import functools
 import os
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
@@ -46,10 +46,11 @@ from ..graph_view import ImportEdgeView
 from .asserts.lexicon import AssertVocabulary
 from .asserts.oracle_reach import collect_cross_file_oracles
 from .complexity import FileComplexity, FunctionComplexity, walk_file
+from .coverage_actions import paired_test_index
 from .crossfn_perf import CrossFunctionPerfStage
 from .dataflow import FileDataflowCache
 from .duplication import ClonePair, DuplicationReport
-from .duplication.detector import clone_ranges, union_line_count
+from .duplication.detector import clone_ranges, clones_against_index, union_line_count
 from .duplication.isolation import detect_clones_with_isolation as detect_clones
 from .file_evaluator import FileEvaluator, _read_source_lines, _RunConfig
 from .file_evaluator import _mark_deepest_block as _mark_deepest_block
@@ -77,6 +78,9 @@ from .scoring import compute_kpis
 from .source_reader import SourceReader, disk_source_reader
 from .walk_cache import HealthWalkCache
 
+if TYPE_CHECKING:
+    from ..function_test_map import FunctionTests
+
 log = structlog.get_logger(__name__)
 
 # Bump when a change to this analyzer makes already-persisted health rows wrong
@@ -98,6 +102,13 @@ log = structlog.get_logger(__name__)
 # Not a licence to move a calibrated scoring weight — those are frozen
 # independently of this stamp.
 #
+# v42: a JavaScript-family file under a ``tests/`` folder inside a ``src`` tree
+# is production unless its name or a test directory says otherwise, and the
+# cross-file assertion pass reads the stored test flag, which moves scope and
+# findings for those files.
+#
+# v41 (also): a loop that grows only by reading tables that do not grow with
+# the repository is bounded (``perf.table_scale``), so its causes leave the queue.
 # v41 (also): ``docs`` / ``docs_src`` count as a docs root only at the
 # repository root or beside a docs-site generator's config, so a product's
 # ``app/docs/`` route is production and stored ``code_origin`` is re-read.
@@ -396,7 +407,7 @@ log = structlog.get_logger(__name__)
 # forms. Files that were counted untested and are not become tested, which
 # moves untested-hotspot findings and the scores that carry them, on every
 # language with a prefix or spec convention rather than Ruby alone.
-HEALTH_ANALYZER_VERSION = 41
+HEALTH_ANALYZER_VERSION = 42
 
 
 def _log_duplication_diagnostics(report: DuplicationReport) -> None:
@@ -547,6 +558,9 @@ class HealthAnalyzer:
         stored_blame_findings: dict[str, list[Any]] | None = None,
         file_dependents: dict[str, int] | None = None,
         tested_files: set[str] | frozenset[str] | None = None,
+        walk_cache: HealthWalkCache | None = None,
+        package_roots: set[str] | None = None,
+        clone_index_dir: Any | None = None,
     ) -> None:
         self.graph = graph
         self.git_meta_map = git_meta_map or {}
@@ -572,7 +586,10 @@ class HealthAnalyzer:
         # The walk result for a file is a function of its bytes, its language
         # and the walker's version, so it is kept beside the index like the
         # parse trees and the clone windows are. Absent without a cache dir.
-        self._walk_cache: HealthWalkCache | None = (
+        # A *walk_cache* passed in is the caller's: it loads and saves it, so
+        # several passes (both sides of a comparison) share one file.
+        self._owns_walk_cache = walk_cache is None
+        self._walk_cache: HealthWalkCache | None = walk_cache or (
             HealthWalkCache(duplication_cache_dir, HEALTH_ANALYZER_VERSION)
             if duplication_cache_dir is not None
             else None
@@ -594,13 +611,21 @@ class HealthAnalyzer:
         # without a blame index (a re-score from stored git metadata) so the
         # pass does not delete what it cannot recompute.
         self.stored_blame_findings = stored_blame_findings or {}
+        # An index's ``.repowise`` for a pass over a few files: their clones
+        # are spliced against the index's pair state (read-only) so partners
+        # this pass never reads still count. ``clone_source`` says where the
+        # last pass's clones came from: "index", "analyzed_files" (only among
+        # the files it read), or None when duplication did not run.
+        self.clone_index_dir = clone_index_dir
+        self.clone_source: str | None = None
         # Dependents counts to gate centrality on instead of this graph's. A
         # revision comparison passes the other side's, so a file crossing a
         # centrality gate inside a partial graph is not read as a code change.
         self._file_dependents_override = file_dependents
         # Files the index records as tested (paired or reached), for a pass holding no tests.
         self._tested_files = frozenset(tested_files or ())
-        self._package_roots_cache: set[str] | None = None
+        # Supplied by a caller that already knows the roots its files sit under.
+        self._package_roots_cache: set[str] | None = package_roots
         self._execution_graph_cache: CallGraphIndex | None = None
         self.test_index = RepoTestIndex(self.graph, self.parsed_files, self._execution_graph)
         self.perf_stage = CrossFunctionPerfStage(
@@ -790,9 +815,16 @@ class HealthAnalyzer:
         """
         from repowise.core.pipeline.phase_timing import timed
 
+        self.clone_source = None
         # An empty splice set: no file whose clone list a biomarker reads changed.
         if "dry_violation" in run.disabled or changed == set():
             return DuplicationReport()
+        if self.clone_index_dir is not None:
+            report = self._clones_against_index()
+            if report is not None:
+                self.clone_source = "index"
+                return report
+        self.clone_source = "analyzed_files"
         try:
             with timed(timings, "analysis.health.duplication"):
                 report = detect_clones(
@@ -807,6 +839,22 @@ class HealthAnalyzer:
         except Exception as exc:
             log.debug("health_duplication_failed", error=str(exc))
             return DuplicationReport()
+
+    def _clones_against_index(self) -> DuplicationReport | None:
+        # A missing, stale or truncated clone state is ``None`` without raising,
+        # so anything raised here is a defect: say so at warning rather than let
+        # the files-only fallback pass for the expected no-index case.
+        try:
+            report = clones_against_index(
+                self.parsed_files,
+                self.git_meta_map,
+                Path(self.clone_index_dir),
+                source_reader=self.read_source,
+            )
+        except Exception as exc:
+            log.warning("health_index_clones_failed", error=repr(exc))
+            return None
+        return report
 
     def _target_files(self, changed_set: set[str] | None) -> list[Any]:
         """The parsed files this pass scores: only the changed ones on an incremental run."""
@@ -897,8 +945,13 @@ class HealthAnalyzer:
         # per-file object, so no file is parsed twice for dataflow.
         dataflow_cache = FileDataflowCache(self.read_source)
         self.perf_stage.run(walked, dataflow_cache, timings)
+        # Before the evaluation: untested_complexity reads each function's nearest test.
+        with timed(timings, "analysis.health.function_tests"):
+            function_tests = self.test_index.function_tests()
         with timed(timings, "analysis.health.repo_stats"):
-            evaluator = self._file_evaluator(run, dup_report, fn_mod_p80, dataflow_cache)
+            evaluator = self._file_evaluator(
+                run, dup_report, fn_mod_p80, dataflow_cache, function_tests
+            )
         with timed(timings, "analysis.health.evaluate"):
             metrics, findings, suggestions = self._evaluate_all(evaluator, walked, on_step)
         # KPIs are repo-wide; on an incremental run they would be biased
@@ -908,8 +961,6 @@ class HealthAnalyzer:
         with timed(timings, "analysis.health.finalize"):
             execution_roles = self._mark_perf_entry_reachability(findings)
             suggestions = self._with_performance_plans(run, findings, suggestions)
-        with timed(timings, "analysis.health.function_tests"):
-            function_tests = self.test_index.function_tests()
         return HealthReport(
             repo_id="",
             analyzed_at=datetime.now(UTC),
@@ -934,6 +985,7 @@ class HealthAnalyzer:
         dup_report: DuplicationReport,
         fn_mod_p80: int | None,
         dataflow_cache: FileDataflowCache,
+        function_tests: FunctionTests | None = None,
     ) -> FileEvaluator:
         """The repo-wide inputs every file's evaluation reads, built once per pass."""
         analyzed_paths = {pf.file_info.path for pf in self.parsed_files}
@@ -951,6 +1003,8 @@ class HealthAnalyzer:
             file_scc_index=build_file_scc_index(self.graph),
             methods_by_file=build_methods_by_file(self.graph),
             dataflow_cache=dataflow_cache,
+            function_tests=function_tests,
+            paired_test_files=paired_test_index(self.test_index.all_test_files()),
         )
 
     def _evaluate_all(
@@ -1207,12 +1261,12 @@ class HealthAnalyzer:
         return kept, _pct_of_kept(file_path, clones, kept, dup_pct)
 
     def _load_walk_cache(self) -> None:
-        if self._walk_cache is not None:
+        if self._walk_cache is not None and self._owns_walk_cache:
             self._walk_cache.load()
 
     def _save_walk_cache(self) -> None:
         """Persist the walk entries this pass used or produced, if any."""
-        if self._walk_cache is not None:
+        if self._walk_cache is not None and self._owns_walk_cache:
             self._walk_cache.save()
             log.debug(
                 "health_walk_cache",
